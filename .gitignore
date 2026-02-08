@@ -1,0 +1,59 @@
+# Video files
+*.mp4
+
+# YOLO model
+*.pt
+
+# Python virtual environment
+.venv/
+__pycache__/
+*.pyc
+
+# Temporary files
+temp_*.mp4
+
+.DS_Store
+
+.env
+*_metadata.json
+
+.cache
+
+.config
+
+output/
+
+# Flutter / Dart
+.dart_tool/
+build/
+
+# Android
+android/.gradle/
+android/local.properties
+android/app/build/
+
+# iOS
+ios/Pods/
+ios/.symlinks/
+ios/Flutter/Flutter.framework
+ios/Flutter/App.framework
+ios/Flutter/engine/
+
+# Python
+venv/
+__pycache__/
+*.pyc
+
+# Node
+dashboard/node_modules/
+
+# Outputs / generated data
+output/
+
+# Flutter / mobile (if still present)
+.dart_tool/
+build/
+
+# General
+*.log
+
