@@ -611,49 +611,118 @@ def get_viral_clips(transcript_result, video_duration, style="original"):
     client = genai.Client(api_key=api_key)
     # Using specific model version to ensure availability
     model_name = 'gemini-2.5-flash' 
-    words = []
+    
+    # Collect all words
+    all_words = []
     for segment in transcript_result['segments']:
         for word in segment.get('words', []):
-            words.append({'w': word['word'], 's': word['start'], 'e': word['end']})
-    prompt_template = PROMPT_LIBRARY.get(style, PROMPT_LIBRARY["original"])
-    prompt = prompt_template.format(video_duration=video_duration, transcript_text=json.dumps(transcript_result['text']), words_json=json.dumps(words))
+            all_words.append({'w': word['word'], 's': word['start'], 'e': word['end']})
     
-    try:
-        response = client.models.generate_content(model=model_name, contents=prompt)
+    # OPTIMIZATION: Sample words for long videos to avoid rate limits
+    # Free tier limit: 250K tokens/minute. A long transcript can easily exceed this.
+    total_words = len(all_words)
+    
+    # Decide sampling rate based on video length
+    if total_words < 1000:  # ~10 min video
+        words = all_words
+        print(f"   📊 Using all {total_words} words for analysis")
+    elif total_words < 2000:  # ~20 min video
+        words = all_words[::2]  # Every 2nd word
+        print(f"   📊 Sampling every 2nd word ({len(words)}/{total_words}) to stay within rate limits")
+    elif total_words < 3000:  # ~30 min video
+        words = all_words[::3]  # Every 3rd word
+        print(f"   📊 Sampling every 3rd word ({len(words)}/{total_words}) to stay within rate limits")
+    else:  # Very long videos
+        words = all_words[::5]  # Every 5th word
+        print(f"   📊 Sampling every 5th word ({len(words)}/{total_words}) to stay within rate limits")
+    
+    prompt_template = PROMPT_LIBRARY.get(style, PROMPT_LIBRARY["original"])
+    prompt = prompt_template.format(
+        video_duration=video_duration, 
+        transcript_text=json.dumps(transcript_result['text']), 
+        words_json=json.dumps(words)
+    )
+    
+    # Retry logic for rate limits
+    max_retries = 3
+    retry_count = 0
+    
+    while retry_count <= max_retries:
         try:
-            usage = response.usage_metadata
-            if usage:
-                input_cost = (usage.prompt_token_count / 1_000_000) * 0.10
-                output_cost = (usage.candidates_token_count / 1_000_000) * 0.40
-                total_cost = input_cost + output_cost
-                cost_analysis = {"input_tokens": usage.prompt_token_count, "output_tokens": usage.candidates_token_count, "total_cost": total_cost, "model": model_name}
-                print(f"💰 Estimated Cost: ${total_cost:.6f}")
-        except Exception: cost_analysis = None
+            response = client.models.generate_content(model=model_name, contents=prompt)
+            
+            # If successful, process the response
+            try:
+                usage = response.usage_metadata
+                if usage:
+                    input_cost = (usage.prompt_token_count / 1_000_000) * 0.10
+                    output_cost = (usage.candidates_token_count / 1_000_000) * 0.40
+                    total_cost = input_cost + output_cost
+                    cost_analysis = {
+                        "input_tokens": usage.prompt_token_count, 
+                        "output_tokens": usage.candidates_token_count, 
+                        "total_cost": total_cost, 
+                        "model": model_name
+                    }
+                    print(f"💰 Estimated Cost: ${total_cost:.6f} (Input: {usage.prompt_token_count} tokens)")
+            except Exception: 
+                cost_analysis = None
 
-        text = response.text
-        
-        # --- ROBUST JSON EXTRACTION ---
-        try:
-            start_index = text.find('{')
-            end_index = text.rfind('}')
-            if start_index != -1 and end_index != -1:
-                json_str = text[start_index : end_index + 1]
-                result_json = json.loads(json_str)
+            text = response.text
+            
+            # --- ROBUST JSON EXTRACTION ---
+            try:
+                start_index = text.find('{')
+                end_index = text.rfind('}')
+                if start_index != -1 and end_index != -1:
+                    json_str = text[start_index : end_index + 1]
+                    result_json = json.loads(json_str)
+                else:
+                    if text.startswith("```json"): text = text[7:]
+                    if text.endswith("```"): text = text[:-3]
+                    text = text.strip()
+                    result_json = json.loads(text)
+            except json.JSONDecodeError as e:
+                print(f"❌ Gemini JSON Parse Error: {e}")
+                print(f"   Raw Text: {text[:200]}...") 
+                return None
+
+            if cost_analysis: result_json['cost_analysis'] = cost_analysis
+            return result_json
+            
+        except Exception as e:
+            error_str = str(e)
+            
+            # Check if it's a rate limit error (429)
+            if "429" in error_str or "RESOURCE_EXHAUSTED" in error_str:
+                retry_count += 1
+                
+                # Try to extract retry delay from error message
+                retry_delay = None
+                try:
+                    import re
+                    # Look for "retry in XXs" or "retryDelay: XXs"
+                    match = re.search(r'retry.*?(\d+(?:\.\d+)?)\s*s', error_str, re.IGNORECASE)
+                    if match:
+                        retry_delay = float(match.group(1))
+                except:
+                    pass
+                
+                # Use exponential backoff if no delay specified
+                if retry_delay is None:
+                    retry_delay = min(30 * (2 ** (retry_count - 1)), 120)  # Max 120s
+                
+                if retry_count <= max_retries:
+                    print(f"⚠️  Rate limit hit. Waiting {retry_delay:.1f}s before retry {retry_count}/{max_retries}...")
+                    time.sleep(retry_delay)
+                else:
+                    print(f"❌ Gemini Error (after {max_retries} retries): {e}")
+                    return None
             else:
-                if text.startswith("```json"): text = text[7:]
-                if text.endswith("```"): text = text[:-3]
-                text = text.strip()
-                result_json = json.loads(text)
-        except json.JSONDecodeError as e:
-            print(f"❌ Gemini JSON Parse Error: {e}")
-            print(f"   Raw Text: {text[:200]}...") 
-            return None
+                # Not a rate limit error, fail immediately
+                print(f"❌ Gemini Error: {e}")
+                return None
 
-        if cost_analysis: result_json['cost_analysis'] = cost_analysis
-        return result_json
-    except Exception as e:
-        print(f"❌ Gemini Error: {e}")
-        return None
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description="AutoCrop-Vertical with Viral Clip Detection.")
