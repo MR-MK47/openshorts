@@ -9,7 +9,7 @@ from google.genai import types
 class VideoEditor:
     def __init__(self, api_key):
         self.client = genai.Client(api_key=api_key)
-        self.model_name = "gemini-3-flash-preview" 
+        self.model_name = "gemini-2.0-flash" 
 
     def upload_video(self, video_path):
         """Uploads video to Gemini File API."""
@@ -39,7 +39,7 @@ class VideoEditor:
 
     def get_ffmpeg_filter(self, video_file_obj, duration, fps=30, width=None, height=None, transcript=None):
         """Asks Gemini for a raw FFmpeg filter string."""
-        if width === None or height === None:
+        if width is None or height is None:
             # Keep prompt usable even if caller didn't pass dimensions.
             width, height = 1080, 1920
         

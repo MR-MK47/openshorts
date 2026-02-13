@@ -20,6 +20,8 @@ from prompts import PROMPT_LIBRARY
 
 # --- Custom Imports ---
 import sheets_client
+from subtitles import SubtitleGenerator
+from editor import VideoEditor
 
 load_dotenv()
 
@@ -421,20 +423,6 @@ class SocialPostRequest(BaseModel):
 
 @app.post("/api/social/post")
 async def social_post(req: SocialPostRequest):
-    """
-    Updates Google Sheet with social post-related data (bottom text and scheduled time)
-    for a specific clip.
-
-    Args:
-        req (SocialPostRequest): The request body containing job_id, clip_index,
-                                 optional bottom_text, and optional scheduled_date.
-                                 Also includes platform-specific posting data which is not
-                                 directly processed by this endpoint in terms of posting,
-                                 but is part of the overall request from the frontend.
-
-    Returns:
-        dict: A success message or an error if the update fails.
-    """
     if not gc:
         raise HTTPException(status_code=500, detail="Google Sheets client not initialized.")
 
@@ -475,4 +463,127 @@ async def social_post(req: SocialPostRequest):
 
     return {"success": True, "message": "Google Sheet updated successfully."}
 
+class SubtitleRequest(BaseModel):
+    job_id: str
+    clip_index: int
+    position: Optional[str] = "bottom" # top, bottom, middle
+    font_size: Optional[int] = 16
+    input_filename: str
 
+@app.post("/api/subtitle")
+async def subtitle_endpoint(req: SubtitleRequest):
+    if req.job_id not in jobs:
+        if not restore_job_state(req.job_id):
+            raise HTTPException(status_code=404, detail="Job not found")
+    
+    job_data = jobs[req.job_id]
+    output_dir = job_data['output_dir']
+    video_path = os.path.join(output_dir, req.input_filename)
+    
+    if not os.path.exists(video_path):
+        raise HTTPException(status_code=404, detail="Video file not found")
+
+    # Load Metadata (Transcript)
+    json_files = glob.glob(os.path.join(output_dir, "*_metadata.json"))
+    if not json_files:
+         raise HTTPException(status_code=404, detail="Metadata file not found")
+    
+    with open(json_files[0], 'r') as f:
+        metadata = json.load(f)
+    
+    shorts = metadata.get('shorts', [])
+    if req.clip_index >= len(shorts):
+         raise HTTPException(status_code=404, detail="Clip index out of range")
+    
+    clip_data = shorts[req.clip_index]
+    transcript = metadata.get('transcript', {})
+    
+    # Initialize Generator
+    api_key = os.environ.get("GEMINI_API_KEY")
+    if not api_key: raise HTTPException(status_code=500, detail="Server missing Gemini API Key")
+    
+    generator = SubtitleGenerator(api_key=api_key)
+    
+    # Generate SRT
+    srt_filename = f"{os.path.splitext(req.input_filename)[0]}.srt"
+    srt_path = os.path.join(output_dir, srt_filename)
+    
+    success = generator.generate_srt(
+        transcript, 
+        clip_data['start'], 
+        clip_data['end'], 
+        srt_path
+    )
+    
+    if not success:
+        raise HTTPException(status_code=500, detail="Failed to generate SRT")
+        
+    # Burn Subtitles
+    burned_filename = f"subtitled_{req.input_filename}"
+    burned_path = os.path.join(output_dir, burned_filename)
+    
+    try:
+        generator.burn_subtitles(
+            video_path, 
+            srt_path, 
+            burned_path, 
+            alignment=req.position, 
+            fontsize=req.font_size
+        )
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Burning failed: {e}")
+        
+    return {"new_video_url": f"/videos/{req.job_id}/{burned_filename}"}
+
+class EditRequest(BaseModel):
+    job_id: str
+    clip_index: int
+    input_filename: str
+
+@app.post("/api/edit")
+async def edit_endpoint(req: EditRequest, x_gemini_key: Optional[str] = Header(None)):
+    if req.job_id not in jobs:
+        if not restore_job_state(req.job_id):
+            raise HTTPException(status_code=404, detail="Job not found")
+    
+    job_data = jobs[req.job_id]
+    output_dir = job_data['output_dir']
+    video_path = os.path.join(output_dir, req.input_filename)
+    
+    if not os.path.exists(video_path):
+        raise HTTPException(status_code=404, detail="Video file not found")
+        
+    # Get Metadata
+    json_files = glob.glob(os.path.join(output_dir, "*_metadata.json"))
+    metadata = {}
+    if json_files:
+        with open(json_files[0], 'r') as f: metadata = json.load(f)
+    
+    api_key = x_gemini_key or os.environ.get("GEMINI_API_KEY")
+    if not api_key: raise HTTPException(status_code=400, detail="Missing API Key")
+
+    editor = VideoEditor(api_key=api_key)
+    
+    # 1. Upload Video to Gemini
+    try:
+        remote_file = editor.upload_video(video_path)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Upload failed: {e}")
+        
+    # 2. Get Filter
+    duration = metadata.get('shorts', [])[req.clip_index].get('end') - metadata.get('shorts', [])[req.clip_index].get('start')
+    filter_data = editor.get_ffmpeg_filter(remote_file, duration)
+    
+    if not filter_data:
+        raise HTTPException(status_code=500, detail="AI failed to generate edit filter")
+        
+    # 3. Apply Edits
+    edited_filename = f"edited_{req.input_filename}"
+    edited_path = os.path.join(output_dir, edited_filename)
+    
+    try:
+        editor.apply_edits(video_path, edited_path, filter_data)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"FFmpeg failed: {e}")
+        
+    return {"new_video_url": f"/videos/{req.job_id}/{edited_filename}"}

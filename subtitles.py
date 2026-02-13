@@ -1,12 +1,12 @@
 import os
 import subprocess
 import json
-import google.generativeai as genai
+from google import genai
 
 class SubtitleGenerator:
     def __init__(self, api_key):
-        genai.configure(api_key=api_key)
-        self.model = genai.GenerativeModel('gemini-1.5-flash')
+        self.client = genai.Client(api_key=api_key)
+        self.model_name = 'gemini-1.5-flash'
 
     def generate_srt(self, transcript, clip_start, clip_end, output_path):
         """
@@ -46,9 +46,19 @@ class SubtitleGenerator:
         OUTPUT (SRT content as a raw string):
         """
         try:
-            response = self.model.generate_content(prompt)
+            response = self.client.models.generate_content(
+                model=self.model_name, 
+                contents=prompt
+            )
             srt_content = response.text.strip()
             
+            # Clean up potential markdown code blocks
+            if srt_content.startswith("```"):
+                srt_content = srt_content.strip("`")
+                if srt_content.startswith("srt"):
+                    srt_content = srt_content[3:]
+                srt_content = srt_content.strip()
+
             # Basic validation
             if "-->" not in srt_content:
                 raise ValueError("Generated text is not in SRT format.")

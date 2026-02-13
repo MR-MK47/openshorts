@@ -33,13 +33,11 @@ load_dotenv()
 
 # --- Custom Imports ---
 import sheets_client
-
-# --- Constants ---
-ASPECT_RATIO = 9 / 16
-
-# --- IMPORTS ---
 from prompts import PROMPT_LIBRARY
 
+# --- Constants ---
+# CHANGED: We now track for a 3:4 ratio (0.75) to allow for Letterboxing in 9:16
+ASPECT_RATIO = 3 / 4 
 
 # Load models
 model = YOLO('yolov8n.pt')
@@ -383,9 +381,12 @@ def process_video_to_vertical(input_video, final_output_video):
         scenes = [(FrameTimecode(0, fps), FrameTimecode(total_frames, fps))]
 
     print(f"   ✅ Found {len(scenes)} scenes.")
-    print("\n   🧠 Step 2: Preparing Active Tracking...")
+    print("\n   🧠 Step 2: Preparing Active Tracking (Letterbox Mode)...")
     original_width, original_height = get_video_resolution(input_video)
+    
+    # OUTPUT_HEIGHT is the height of the CROP (usually full height of source)
     OUTPUT_HEIGHT = original_height
+    # OUTPUT_WIDTH is the width of the CROP (3:4 ratio)
     OUTPUT_WIDTH = int(OUTPUT_HEIGHT * ASPECT_RATIO)
     if OUTPUT_WIDTH % 2 != 0: OUTPUT_WIDTH += 1
 
@@ -461,21 +462,18 @@ def process_video_to_vertical(input_video, final_output_video):
     try: subprocess.run(audio_extract_command, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
     except subprocess.CalledProcessError: pass
 
-    print("\n   ✨ Step 6: Merging...")
+    print("\n   ✨ Step 6: Merging and Padding for Letterbox (9:16)...")
     
-    # Calculate target dimensions for 9:16 aspect ratio
-    original_width, original_height = get_video_resolution(input_video) # Re-get input dimensions
-    target_height = original_height # Assume original height for now, adjust width
-    target_width = int(target_height * ASPECT_RATIO)
-    if target_width % 2 != 0: target_width += 1 # Ensure even width
-
-    # If the video is already vertical (or close enough), no padding needed, just resize
-    # Otherwise, pad to 9:16
+    # Goal: 1080x1920 Final Output
+    # Current Video: OUTPUT_WIDTH x OUTPUT_HEIGHT (approx 810x1080)
+    # 1. Scale width to 1080 (maintaining aspect ratio). New height will be approx 1440.
+    # 2. Pad to 1080x1920 (centering vertically).
     
-    # Define complex filter for scaling and padding to 9:16
-    # scale: ensures video fits within target_width x target_height while maintaining aspect ratio
-    # pad: adds black bars to make it exactly target_width x target_height
-    video_filter = f"scale='min({target_width},iw)':min'{target_height},ih)':force_original_aspect_ratio=decrease,pad={target_width}:{target_height}:(ow-iw)/2:(oh-ih)/2:black"
+    TARGET_FINAL_W = 1080
+    TARGET_FINAL_H = 1920
+    
+    # Scale to fill width of 1080, allow height to scale proportionally
+    video_filter = f"scale={TARGET_FINAL_W}:-1,pad={TARGET_FINAL_W}:{TARGET_FINAL_H}:(ow-iw)/2:(oh-ih)/2:black"
 
     if os.path.exists(temp_audio_output):
         merge_command = [
@@ -492,7 +490,9 @@ def process_video_to_vertical(input_video, final_output_video):
             '-c:v', 'libx264', '-crf', '23', '-preset', 'fast',
             '-an', # no audio
             final_output_video
-        ]    try:
+        ]
+        
+    try:
         subprocess.run(merge_command, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
         print(f"   ✅ Clip saved to {final_output_video}")
     except subprocess.CalledProcessError as e:
@@ -764,7 +764,7 @@ if __name__ == '__main__':
     
     parser.add_argument('-o', '--output', type=str, help="Output directory.")
     parser.add_argument('--keep-original', action='store_true', help="Keep original video.")
-    parser.add_argument('--skip-analysis', action='true', help="Process whole video.")
+    parser.add_argument('--skip-analysis', action='store_true', help="Process whole video.")
     parser.add_argument('--style', type=str, default='original', choices=list(PROMPT_LIBRARY.keys()), help="Style of viral clips to generate.")
 
     
@@ -846,6 +846,10 @@ if __name__ == '__main__':
                 print(f"   ⚠️ Error reading existing clips from Google Sheet: {e}")
         
         for i, clip in enumerate(clips_data['shorts']):
+            # Filter by indices
+            if (i+1) not in selected_indices:
+                continue
+
             clip_id_to_check = f"{video_title}_clip_{i+1}"
             if clip_id_to_check in existing_clip_ids:
                 print(f"\n⏩ Skipping Clip {i+1} ({clip_id_to_check}) as it already exists in Google Sheet.")
