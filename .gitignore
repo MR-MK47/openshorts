@@ -23,6 +23,10 @@ temp_*.mp4
 
 output/
 
+#Specify & Gemini
+.gemini
+.specify
+
 # Flutter / Dart
 .dart_tool/
 build/
