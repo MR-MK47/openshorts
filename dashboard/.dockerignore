@@ -1,0 +1,25 @@
+# Git
+.git
+.gitignore
+
+# Dependencies
+node_modules
+
+# Build artifacts
+dist
+build
+
+# Logs
+*.log
+
+# Environment variables
+.env*
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Docker
+Dockerfile

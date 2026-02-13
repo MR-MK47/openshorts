@@ -18,6 +18,9 @@ from pydantic import BaseModel
 from s3_uploader import upload_job_artifacts
 from prompts import PROMPT_LIBRARY
 
+# --- Custom Imports ---
+import sheets_client
+
 load_dotenv()
 
 # Constants
@@ -33,6 +36,11 @@ JOB_RETENTION_SECONDS = 3600
 job_queue = asyncio.Queue()
 jobs: Dict[str, Dict] = {}
 concurrency_semaphore = asyncio.Semaphore(MAX_CONCURRENT_JOBS)
+
+# Global Google Sheets client
+gc = None
+main_spreadsheet_title = os.getenv("GOOGLE_SHEET_TITLE", "OpenShorts Clips")
+main_sheet_name = os.getenv("GOOGLE_SHEET_WORKSHEET_TITLE", "Clips")
 
 def get_timestamp():
     return datetime.now().strftime("%H:%M:%S")
@@ -140,6 +148,15 @@ async def run_job_wrapper(job_id):
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    global gc
+    try:
+        gc = sheets_client.get_gspread_client()
+        sheets_client.initialize_main_sheet(gc, main_spreadsheet_title, main_sheet_name)
+        print("✅ Google Sheets client initialized successfully in app.py")
+    except Exception as e:
+        print(f"❌ Could not initialize Google Sheets client in app.py: {e}")
+        gc = None
+
     asyncio.create_task(process_queue())
     asyncio.create_task(cleanup_jobs())
     yield
@@ -241,6 +258,39 @@ async def run_job(job_id, job_data):
                     jobs[job_id]['result'] = {'clips': generated_clips, 'cost_analysis': data.get('cost_analysis')}
                     loop = asyncio.get_event_loop()
                     loop.run_in_executor(None, copy_to_gdrive, job_id, output_dir, data, base_name)
+
+                    # Log clip metadata to Google Sheet
+                    if gc and generated_clips:
+                        try:
+                            # Correct logic for appending:
+                            # Get the worksheet object directly and use append_rows
+                            worksheet = gc.open(main_spreadsheet_title).worksheet(main_sheet_name)
+                            all_values = worksheet.get_all_values() # Get all existing data, including potential headers
+                            
+                            new_rows_data = []
+                            for clip_index, clip_data in enumerate(generated_clips):
+                                clip_id = f"{base_name}_clip_{clip_index+1}"
+                                status = "completed"
+                                gen_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                                ai_title = clip_data.get('video_title_for_youtube_short', '')
+                                bottom_text = clip_data.get('bottom_text', '')
+                                scheduled_time = clip_data.get('scheduled_time', '')
+                                new_rows_data.append([clip_id, status, gen_time, ai_title, bottom_text, scheduled_time])
+                            
+                            if not all_values or len(all_values[0]) != len(new_rows_data[0]): # Check if headers are missing or mismatched
+                                # If sheet is empty or headers don't match, write headers + new rows
+                                headers = ["Clip ID", "Status", "Generation Time", "AI Title", "Bottom Text", "Scheduled Time"]
+                                worksheet.clear() # Clear existing content before writing new headers
+                                worksheet.append_rows([headers] + new_rows_data)
+                                jobs[job_id]['logs'].append(f"[{get_timestamp()}] ✅ Initialized Google Sheet with headers and logged clip metadata.")
+                            else:
+                                # If headers exist and match, just append new rows
+                                worksheet.append_rows(new_rows_data)
+                                jobs[job_id]['logs'].append(f"[{get_timestamp()}] ✅ Appended clip metadata to Google Sheet.")
+
+                        except Exception as e:
+                            jobs[job_id]['logs'].append(f"[{get_timestamp()}] ❌ Error logging clip metadata to Google Sheet: {e}")
+
         else:
             jobs[job_id]['status'] = 'failed'
         
@@ -333,3 +383,96 @@ async def generate_selected(req: GenerateSelectionRequest):
     save_job_state(req.job_id) # Save new state
     await job_queue.put(req.job_id)
     return {"success": True, "status": "queued"}
+
+@app.get("/api/clips/{video_title}")
+async def get_clips_for_video(video_title: str):
+    """
+    Fetches clip data for a specific video from the Google Sheet.
+    """
+    if not gc:
+        raise HTTPException(status_code=500, detail="Google Sheets client not initialized.")
+    
+    try:
+        all_clips = sheets_client.read_sheet_data(gc, main_spreadsheet_title, main_sheet_name)
+        if not all_clips:
+            return {"video_title": video_title, "clips": []}
+        
+        filtered_clips = [
+            clip for clip in all_clips 
+            if clip.get("Clip ID", "").startswith(f"{video_title}_clip_")
+        ]
+        return {"video_title": video_title, "clips": filtered_clips}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error fetching clips from Google Sheet: {e}")
+
+
+class SocialPostRequest(BaseModel):
+    job_id: str
+    clip_index: int
+    bottom_text: Optional[str] = None
+    scheduled_date: Optional[str] = None
+    api_key: str
+    user_id: str
+    platforms: List[str]
+    title: str
+    description: str
+    timezone: Optional[str] = None
+
+
+@app.post("/api/social/post")
+async def social_post(req: SocialPostRequest):
+    """
+    Updates Google Sheet with social post-related data (bottom text and scheduled time)
+    for a specific clip.
+
+    Args:
+        req (SocialPostRequest): The request body containing job_id, clip_index,
+                                 optional bottom_text, and optional scheduled_date.
+                                 Also includes platform-specific posting data which is not
+                                 directly processed by this endpoint in terms of posting,
+                                 but is part of the overall request from the frontend.
+
+    Returns:
+        dict: A success message or an error if the update fails.
+    """
+    if not gc:
+        raise HTTPException(status_code=500, detail="Google Sheets client not initialized.")
+
+    if req.job_id not in jobs:
+        if not restore_job_state(req.job_id):
+            raise HTTPException(status_code=404, detail="Job not found")
+    
+    job_data = jobs[req.job_id]
+    output_dir = job_data['output_dir']
+    
+    json_files = glob.glob(os.path.join(output_dir, "*_metadata.json"))
+    if not json_files:
+        raise HTTPException(status_code=404, detail="Metadata file not found for job.")
+        
+    base_name = os.path.basename(json_files[0]).replace('_metadata.json', '')
+    clip_id = f"{base_name}_clip_{req.clip_index + 1}"
+
+    data_to_update = {}
+    if req.bottom_text is not None:
+        data_to_update['Bottom Text'] = req.bottom_text
+    if req.scheduled_date is not None:
+        data_to_update['Scheduled Time'] = req.scheduled_date
+        data_to_update['Status'] = 'Scheduled'
+
+    if not data_to_update:
+        return {"success": True, "message": "Nothing to update."}
+
+    success = sheets_client.update_clip_data(
+        gc,
+        main_spreadsheet_title,
+        main_sheet_name,
+        clip_id,
+        data_to_update
+    )
+
+    if not success:
+        raise HTTPException(status_code=500, detail="Failed to update Google Sheet.")
+
+    return {"success": True, "message": "Google Sheet updated successfully."}
+
+

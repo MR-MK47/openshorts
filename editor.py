@@ -39,7 +39,7 @@ class VideoEditor:
 
     def get_ffmpeg_filter(self, video_file_obj, duration, fps=30, width=None, height=None, transcript=None):
         """Asks Gemini for a raw FFmpeg filter string."""
-        if width is None or height is None:
+        if width === None or height === None:
             # Keep prompt usable even if caller didn't pass dimensions.
             width, height = 1080, 1920
         
@@ -200,6 +200,145 @@ class VideoEditor:
             s = pat.sub(repl, s)
 
         return s
+
+    def process_video_to_vertical(self, input_video, output_video, aspect_ratio="9:16"):
+        """
+        Processes a video to a vertical aspect ratio by adding black bars (letterboxing).
+        """
+        try:
+            # Get input video dimensions
+            probe_cmd = ['ffprobe', '-v', 'error', '-select_streams', 'v:0',
+                         '-show_entries', 'stream=width,height', '-of', 'csv=s=x:p=0', input_video]
+            res_out = subprocess.check_output(probe_cmd).decode().strip()
+            w, h = map(int, res_out.split('x'))
+
+            target_w, target_h = 1080, 1920 # Common vertical format
+            if aspect_ratio == "9:16":
+                scale = min(target_w / w, target_h / h)
+                new_w = int(w * scale)
+                new_h = int(h * scale)
+                pad_x = (target_w - new_w) // 2
+                pad_y = (target_h - new_h) // 2
+
+                vf_filter = f"scale={new_w}:{new_h},pad={target_w}:{target_h}:{pad_x}:{pad_y}:black"
+
+                cmd = [
+                    'ffmpeg', '-y', '-i', input_video,
+                    '-vf', vf_filter,
+                    '-c:v', 'libx264', '-preset', 'fast', '-crf', '23',
+                    '-c:a', 'copy',
+                    output_video
+                ]
+
+                subprocess.run(cmd, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
+                print(f"✅ Video processed to vertical format: {output_video}")
+                return True
+        except Exception as e:
+            print(f"❌ Failed to process video to vertical: {e}")
+            return False
+
+    def add_letterbox_text(self, input_video, output_video, top_text="", bottom_text="",
+                           fontfile="/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
+                           fontsize=50, fontcolor="white", bordercolor="black", borderw=2):
+        """
+        Burns text onto the top and bottom of the video using a single ffmpeg drawtext filter.
+        """
+        filters = []
+        if top_text:
+            escaped_top_text = top_text.replace("'", "'\\''")
+            x_pos = "(w-text_w)/2"
+            y_pos = "h/8"
+            filters.append(
+                f"drawtext=fontfile='{fontfile}':text='{escaped_top_text}':"
+                f"x={x_pos}:y={y_pos}:fontsize={fontsize}:fontcolor={fontcolor}:"
+                f"bordercolor={bordercolor}:borderw={borderw}"
+            )
+        if bottom_text:
+            escaped_bottom_text = bottom_text.replace("'", "'\\''")
+            x_pos = "(w-text_w)/2"
+            y_pos = "h*7/8-text_h"
+            filters.append(
+                f"drawtext=fontfile='{fontfile}':text='{escaped_bottom_text}':"
+                f"x={x_pos}:y={y_pos}:fontsize={fontsize}:fontcolor={fontcolor}:"
+                f"bordercolor={bordercolor}:borderw={borderw}"
+            )
+
+        if not filters:
+            print("No text provided, copying video without changes.")
+            # just copy the file
+            import shutil
+            shutil.copy(input_video, output_video)
+            return True
+
+        drawtext_filter = ",".join(filters)
+
+        cmd = [
+            'ffmpeg', '-y', '-i', input_video,
+            '-vf', drawtext_filter,
+            '-c:v', 'libx264', '-preset', 'fast', '-crf', '23',
+            '-c:a', 'copy',
+            output_video
+        ]
+
+        env = os.environ.copy()
+        env["LANG"] = "C.UTF-8"
+        env["LC_ALL"] = "C.UTF-8"
+
+        try:
+            subprocess.run(cmd, check=True, env=env, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
+            print(f"✅ Text overlay added to {output_video}")
+            return True
+        except subprocess.CalledProcessError as e:
+            print(f"❌ Failed to add text overlay: {e}")
+            print(f"Stderr: {e.stderr.decode()}")
+            return False
+
+    def add_text_overlay(self, input_video, output_video, text, position="top", 
+                         fontfile="/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf", # Common path for a bold font
+                         fontsize=50, fontcolor="white", bordercolor="black", borderw=2):
+        """
+        Burns text onto the video using ffmpeg drawtext filter.
+        """
+        # Sanitize text for FFmpeg filter
+        escaped_text = text.replace("'", "'\\''")
+        
+        # Determine position
+        x_pos = "(w-text_w)/2" # Center horizontally
+        if position == "top":
+            y_pos = "h/8"
+        elif position == "bottom":
+            y_pos = "h*7/8-text_h"
+        elif position == "center":
+            y_pos = "(h-text_h)/2"
+        else: # Default to top
+            y_pos = "h/8"
+
+        drawtext_filter = (
+            f"drawtext=fontfile='{fontfile}':text='{escaped_text}':"
+            f"x={x_pos}:y={y_pos}:fontsize={fontsize}:fontcolor={fontcolor}:"
+            f"bordercolor={bordercolor}:borderw={borderw}"
+        )
+
+        cmd = [
+            'ffmpeg', '-y', '-i', input_video,
+            '-vf', drawtext_filter,
+            '-c:v', 'libx264', '-preset', 'fast', '-crf', '23',
+            '-c:a', 'copy',
+            output_video
+        ]
+
+        env = os.environ.copy()
+        env["LANG"] = "C.UTF-8"
+        env["LC_ALL"] = "C.UTF-8"
+
+        try:
+            subprocess.run(cmd, check=True, env=env, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
+            print(f"✅ Text overlay added to {output_video}")
+            return True
+        except subprocess.CalledProcessError as e:
+            print(f"❌ Failed to add text overlay: {e}")
+            print(f"Stderr: {e.stderr.decode()}")
+            return False
 
     def apply_edits(self, input_path, output_path, filter_data):
         """Executes FFmpeg with the generated filter."""

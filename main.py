@@ -31,6 +31,9 @@ warnings.filterwarnings("ignore", category=UserWarning, module='google.protobuf'
 # Load environment variables
 load_dotenv()
 
+# --- Custom Imports ---
+import sheets_client
+
 # --- Constants ---
 ASPECT_RATIO = 9 / 16
 
@@ -459,11 +462,37 @@ def process_video_to_vertical(input_video, final_output_video):
     except subprocess.CalledProcessError: pass
 
     print("\n   ✨ Step 6: Merging...")
+    
+    # Calculate target dimensions for 9:16 aspect ratio
+    original_width, original_height = get_video_resolution(input_video) # Re-get input dimensions
+    target_height = original_height # Assume original height for now, adjust width
+    target_width = int(target_height * ASPECT_RATIO)
+    if target_width % 2 != 0: target_width += 1 # Ensure even width
+
+    # If the video is already vertical (or close enough), no padding needed, just resize
+    # Otherwise, pad to 9:16
+    
+    # Define complex filter for scaling and padding to 9:16
+    # scale: ensures video fits within target_width x target_height while maintaining aspect ratio
+    # pad: adds black bars to make it exactly target_width x target_height
+    video_filter = f"scale='min({target_width},iw)':min'{target_height},ih)':force_original_aspect_ratio=decrease,pad={target_width}:{target_height}:(ow-iw)/2:(oh-ih)/2:black"
+
     if os.path.exists(temp_audio_output):
-        merge_command = ['ffmpeg', '-y', '-i', temp_video_output, '-i', temp_audio_output, '-c:v', 'copy', '-c:a', 'copy', final_output_video]
+        merge_command = [
+            'ffmpeg', '-y', '-i', temp_video_output, '-i', temp_audio_output,
+            '-vf', video_filter,
+            '-c:v', 'libx264', '-crf', '23', '-preset', 'fast',
+            '-c:a', 'aac', '-b:a', '128k',
+            final_output_video
+        ]
     else:
-         merge_command = ['ffmpeg', '-y', '-i', temp_video_output, '-c:v', 'copy', final_output_video]
-    try:
+         merge_command = [
+            'ffmpeg', '-y', '-i', temp_video_output,
+            '-vf', video_filter,
+            '-c:v', 'libx264', '-crf', '23', '-preset', 'fast',
+            '-an', # no audio
+            final_output_video
+        ]    try:
         subprocess.run(merge_command, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
         print(f"   ✅ Clip saved to {final_output_video}")
     except subprocess.CalledProcessError as e:
@@ -735,12 +764,23 @@ if __name__ == '__main__':
     
     parser.add_argument('-o', '--output', type=str, help="Output directory.")
     parser.add_argument('--keep-original', action='store_true', help="Keep original video.")
-    parser.add_argument('--skip-analysis', action='store_true', help="Process whole video.")
+    parser.add_argument('--skip-analysis', action='true', help="Process whole video.")
     parser.add_argument('--style', type=str, default='original', choices=list(PROMPT_LIBRARY.keys()), help="Style of viral clips to generate.")
 
     
     args = parser.parse_args()
     script_start_time = time.time()
+
+    # Initialize Google Sheets client
+    gc = None
+    try:
+        gc = sheets_client.get_gspread_client()
+        main_spreadsheet_title = os.getenv("GOOGLE_SHEET_TITLE", "OpenShorts Clips")
+        main_sheet_name = os.getenv("GOOGLE_SHEET_WORKSHEET_TITLE", "Clips")
+        sheets_client.initialize_main_sheet(gc, main_spreadsheet_title, main_sheet_name)
+    except Exception as e:
+        print(f"   ⚠️ Could not initialize Google Sheets: {e}")
+        gc = None
     
     def _ensure_dir(path: str) -> str:
         if path: os.makedirs(path, exist_ok=True)
@@ -794,8 +834,21 @@ if __name__ == '__main__':
             
         selected_indices = [int(i) for i in args.process_indices.split(',') if i.strip().isdigit()]
         
+        # Query existing clips from Google Sheet if gc is available
+        existing_clip_ids = set()
+        if gc:
+            try:
+                sheet_data = sheets_client.read_sheet_data(gc, main_spreadsheet_title, main_sheet_name)
+                if sheet_data:
+                    existing_clip_ids = {row.get('Clip ID') for row in sheet_data if row.get('Clip ID')}
+                print(f"   ℹ️ Found {len(existing_clip_ids)} existing clips in Google Sheet.")
+            except Exception as e:
+                print(f"   ⚠️ Error reading existing clips from Google Sheet: {e}")
+        
         for i, clip in enumerate(clips_data['shorts']):
-            if i not in selected_indices:
+            clip_id_to_check = f"{video_title}_clip_{i+1}"
+            if clip_id_to_check in existing_clip_ids:
+                print(f"\n⏩ Skipping Clip {i+1} ({clip_id_to_check}) as it already exists in Google Sheet.")
                 continue
                 
             print(f"\n🎬 Rendering Clip {i+1} (Selected)...")
@@ -879,7 +932,23 @@ if __name__ == '__main__':
             clips_data['transcript'] = transcript
             with open(metadata_file, 'w') as f: json.dump(clips_data, f, indent=2)
             
+            # Query existing clips from Google Sheet if gc is available
+            existing_clip_ids = set()
+            if gc:
+                try:
+                    sheet_data = sheets_client.read_sheet_data(gc, main_spreadsheet_title, main_sheet_name)
+                    if sheet_data:
+                        existing_clip_ids = {row.get('Clip ID') for row in sheet_data if row.get('Clip ID')}
+                    print(f"   ℹ️ Found {len(existing_clip_ids)} existing clips in Google Sheet.")
+                except Exception as e:
+                    print(f"   ⚠️ Error reading existing clips from Google Sheet: {e}")
+
             for i, clip in enumerate(clips_data['shorts']):
+                clip_id_to_check = f"{video_title}_clip_{i+1}"
+                if clip_id_to_check in existing_clip_ids:
+                    print(f"\n⏩ Skipping Clip {i+1} ({clip_id_to_check}) as it already exists in Google Sheet.")
+                    continue
+
                 print(f"Processing Clip {i+1}...")
                 clip_filename = f"{video_title}_clip_{i+1}.mp4"
                 clip_temp = os.path.join(output_dir, f"temp_{clip_filename}")

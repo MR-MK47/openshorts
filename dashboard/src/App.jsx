@@ -134,6 +134,10 @@ function App() {
   const logsContainerRef = useRef(null);
   const [shouldAutoScroll, setShouldAutoScroll] = useState(true);
 
+  // NEW: State to store clips fetched from the Google Sheet API
+  const [videoClips, setVideoClips] = useState([]);
+
+
   // --- Handlers ---
   const handleClipPlay = (startTime) => {
     setSyncedTime(startTime);
@@ -205,6 +209,7 @@ function App() {
     setProcessingMedia(null);
     setSelectedIndices([]);
     setShouldAutoScroll(true);
+    setVideoClips([]); // Clear video clips on reset
   };
 
   const fetchUserProfiles = async () => {
@@ -284,6 +289,25 @@ function App() {
     }
     return () => clearInterval(interval);
   }, [status, jobId]);
+
+  // Effect to fetch video clips from the backend
+  useEffect(() => {
+    const fetchVideoClips = async () => {
+      if (status === 'complete' && processingMedia?.videoTitle) {
+        try {
+          const res = await fetch(getApiUrl(`/api/clips/${processingMedia.videoTitle}`));
+          if (!res.ok) throw new Error("Failed to fetch video clips");
+          const data = await res.json();
+          setVideoClips(data.clips);
+          setLogs(l => [...l, `📊 Fetched ${data.clips.length} clips from Google Sheet.`]);
+        } catch (e) {
+          setLogs(l => [...l, `❌ Error fetching video clips from Google Sheet: ${e.message}`]);
+        }
+      }
+    };
+    fetchVideoClips();
+  }, [status, processingMedia]);
+
 
   useEffect(() => {
     if (shouldAutoScroll && logsEndRef.current) logsEndRef.current.scrollIntoView({ behavior: "smooth" });
@@ -458,23 +482,24 @@ function App() {
                   </div>
                 )}
                 {/* --- RESULTS VIEW (Complete) --- */}
-                {(status === 'complete' || (status === 'processing' && results?.clips && results.clips.length > 0)) && (
+                {(status === 'complete' || (status === 'processing' && (results?.clips && results.clips.length > 0 || videoClips.length > 0))) && (
                   <div className="flex flex-col h-full animate-[fadeIn_0.3s_ease-out]">
                     <h2 className="text-lg font-semibold mb-6 flex items-center gap-2 shrink-0">
                       <Sparkles className="text-yellow-400" size={20} /> Generated Shorts
-                      {results?.clips?.length > 0 && (
+                      {/* Display count from backend-fetched clips if available, otherwise from results */}
+                      {(results?.clips?.length > 0 || videoClips.length > 0) && (
                         <span className="text-xs bg-white/10 text-white px-2 py-0.5 rounded-full ml-auto flex items-center gap-2">
                           {status === 'processing' && <span className="w-2 h-2 bg-primary rounded-full animate-pulse" />}
-                          {results.clips.length} Clips Ready
+                          {videoClips.length > 0 ? videoClips.length : results.clips.length} Clips Ready
                         </span>
                       )}
                     </h2>
                     <div className="flex-1 overflow-y-auto custom-scrollbar p-1">
                       {/* CHANGED: 1 column default ensures wide cards are not squished. 2 columns only on huge screens. */}
                       <div className="grid grid-cols-1 2xl:grid-cols-2 gap-6 pb-10">
-                        {results.clips.map((clip, i) => (
+                        {(videoClips.length > 0 ? videoClips : results.clips).map((clip, i) => (
                           <ResultCard
-                            key={clip.video_url || i}
+                            key={clip["Clip ID"] || i} // Use Clip ID from sheet or index
                             clip={clip}
                             index={i}
                             jobId={jobId}

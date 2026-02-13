@@ -24,8 +24,8 @@ temp_*.mp4
 output/
 
 #Specify & Gemini
-.gemini
-.specify
+# .gemini
+# .specify
 
 # Flutter / Dart
 .dart_tool/
@@ -47,9 +47,17 @@ ios/Flutter/engine/
 venv/
 __pycache__/
 *.pyc
+*.egg-info/
+dist/
+build/
+
 
 # Node
 dashboard/node_modules/
+dist/
+build/
+.env*
+
 
 # Outputs / generated data
 output/
@@ -60,4 +68,7 @@ build/
 
 # General
 *.log
-
+.vscode/
+.idea/
+*.swp
+*.tmp

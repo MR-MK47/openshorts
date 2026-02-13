@@ -17,6 +17,7 @@ export default function ResultCard({ clip, index, jobId, uploadPostKey, uploadUs
     });
     const [postTitle, setPostTitle] = useState("");
     const [postDescription, setPostDescription] = useState("");
+    const [bottomText, setBottomText] = useState("");
     const [isScheduling, setIsScheduling] = useState(false);
     const [scheduleDate, setScheduleDate] = useState("");
 
@@ -31,6 +32,7 @@ export default function ResultCard({ clip, index, jobId, uploadPostKey, uploadUs
         if (showModal) {
             setPostTitle(clip.video_title_for_youtube_short || "Viral Short");
             setPostDescription(clip.video_description_for_instagram || clip.video_description_for_tiktok || "");
+            setBottomText(clip.bottom_text || "");
             setIsScheduling(false);
             setScheduleDate("");
             setPostResult(null);
@@ -152,7 +154,8 @@ export default function ResultCard({ clip, index, jobId, uploadPostKey, uploadUs
                 user_id: uploadUserId,
                 platforms: selectedPlatforms,
                 title: postTitle,
-                description: postDescription
+                description: postDescription,
+                bottom_text: bottomText
             };
 
             if (isScheduling && scheduleDate) {
@@ -379,6 +382,17 @@ export default function ResultCard({ clip, index, jobId, uploadPostKey, uploadUs
                                     rows={4}
                                     className="w-full bg-black/40 border border-white/10 rounded-lg p-2 text-sm text-white focus:outline-none focus:border-primary/50 placeholder-zinc-600 resize-none"
                                     placeholder="Write a caption for your post..."
+                                />
+                            </div>
+
+                            <div>
+                                <label className="block text-xs font-bold text-zinc-400 mb-1">Bottom Text</label>
+                                <input
+                                    type="text"
+                                    value={bottomText}
+                                    onChange={(e) => setBottomText(e.target.value)}
+                                    className="w-full bg-black/40 border border-white/10 rounded-lg p-2 text-sm text-white focus:outline-none focus:border-primary/50 placeholder-zinc-600"
+                                    placeholder="e.g., your @handle"
                                 />
                             </div>
 

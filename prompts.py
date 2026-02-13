@@ -4,7 +4,7 @@
 PROMPT_LIBRARY = {
     "original":
     """
-You are a senior short-form video editor. Read the ENTIRE transcript and word-level timestamps to choose the 3–15 MOST VIRAL moments for TikTok/IG Reels/YouTube Shorts. Each clip must be between 15 and 60 seconds long.
+You are a senior short-form video editor. Read the ENTIRE transcript and word-level timestamps to choose the 3–15 MOST VIRAL moments for TikTok/IG Reels/YouTube Shorts. Each clip must be between 15 and 60 seconds long. Each clip must tell a self-contained story or present a compelling, coherent narrative arc from start to finish.
 
 ⚠️ FFMPEG TIME CONTRACT — STRICT REQUIREMENTS:
 - Return timestamps in ABSOLUTE SECONDS from the start of the video (usable in: ffmpeg -ss <start> -to <end> -i <input> ...).
@@ -72,7 +72,7 @@ VIDEO_DURATION_SECONDS: {video_duration}
 TRANSCRIPT_TEXT (raw):
 {transcript_text}
 
-WORDS_JSON:
+WORDS_JSON (array of {{w, s, e}} where s/e are seconds):
 {words_json}
 
 ### OUTPUT — RETURN ONLY VALID JSON:
@@ -124,3 +124,4 @@ OUTPUT — RETURN ONLY VALID JSON:
 }}
 """
 }
+
